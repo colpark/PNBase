@@ -30,6 +30,9 @@ if PIXNERD_DIR.exists():
     sys.path.insert(0, str(PIXNERD_DIR))
 
 import torch
+# Disable torch.compile to avoid inductor errors with this model
+torch._dynamo.config.suppress_errors = True
+
 from lightning import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import WandbLogger, CSVLogger
