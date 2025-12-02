@@ -166,7 +166,7 @@ class ExtendedNerfEmbedder(nn.Module):
             y_flat = y_flat + torch.randn_like(y_flat) * jitter_scale
             x_flat = x_flat + torch.randn_like(x_flat) * jitter_scale
 
-        # Compute Fourier features
+        # Compute Fourier features using sin/cos (avoids complex dtype issues with bfloat16)
         dim = self.max_freqs ** 2 * 2
         theta = 10000.0
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 4, device=device, dtype=dtype)[: (dim // 4)] / dim))
@@ -174,13 +174,17 @@ class ExtendedNerfEmbedder(nn.Module):
         x_freqs = torch.outer(x_flat, freqs)
         y_freqs = torch.outer(y_flat, freqs)
 
-        x_cis = torch.polar(torch.ones_like(x_freqs), x_freqs)
-        y_cis = torch.polar(torch.ones_like(y_freqs), y_freqs)
+        # Use sin/cos directly instead of torch.polar (which requires complex dtype)
+        x_cos = torch.cos(x_freqs)
+        x_sin = torch.sin(x_freqs)
+        y_cos = torch.cos(y_freqs)
+        y_sin = torch.sin(y_freqs)
 
-        freqs_cis = torch.cat([x_cis.unsqueeze(dim=-1), y_cis.unsqueeze(dim=-1)], dim=-1)
-        freqs_cis = freqs_cis.reshape(patch_size_h * patch_size_w, -1)
+        # Combine into position encoding [x_cos, y_cos, x_sin, y_sin]
+        pos_encoding = torch.cat([x_cos, y_cos, x_sin, y_sin], dim=-1)
+        pos_encoding = pos_encoding[:, :self.max_freqs ** 2]
 
-        return freqs_cis.unsqueeze(0)
+        return pos_encoding.unsqueeze(0)
 
     def forward(self, inputs, patch_size_h, patch_size_w):
         """
