@@ -20,6 +20,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
+from functools import partial
 
 # Add PixNerd to path
 SCRIPT_DIR = Path(__file__).parent.absolute()
@@ -130,9 +131,8 @@ def build_model(args):
     # EMA
     ema_tracker = SimpleEMA(decay=0.9999)
 
-    # Optimizer
-    optimizer = torch.optim.AdamW
-    optimizer_kwargs = {"lr": args.lr, "weight_decay": 0.0}
+    # Optimizer (use partial to bind lr and weight_decay)
+    optimizer = partial(torch.optim.AdamW, lr=args.lr, weight_decay=0.0)
 
     # Build LightningModel
     model = LightningModel(
@@ -143,7 +143,6 @@ def build_model(args):
         diffusion_sampler=sampler,
         ema_tracker=ema_tracker,
         optimizer=optimizer,
-        optimizer_kwargs=optimizer_kwargs,
         lr_scheduler=None,
         eval_original_model=False,
     )
