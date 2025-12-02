@@ -75,15 +75,16 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
 
     # Model config - KEY DIFFERENCE: patch_size and dense_samples are independent!
+    # Default config: ~10M parameters (small model for fast experimentation)
     parser.add_argument("--patch_size", type=int, default=2,
                        help="Encoder patch size (32/2=16x16=256 encoder tokens)")
     parser.add_argument("--dense_samples", type=int, default=16,
                        help="NerfEmbedder position samples per axis (16x16=256 positions, INDEPENDENT of patch_size)")
-    parser.add_argument("--hidden_size", type=int, default=512, help="Encoder hidden dimension")
-    parser.add_argument("--decoder_hidden_size", type=int, default=64, help="Decoder hidden dimension")
-    parser.add_argument("--num_encoder_blocks", type=int, default=12, help="Number of encoder blocks")
+    parser.add_argument("--hidden_size", type=int, default=256, help="Encoder hidden dimension")
+    parser.add_argument("--decoder_hidden_size", type=int, default=32, help="Decoder hidden dimension")
+    parser.add_argument("--num_encoder_blocks", type=int, default=6, help="Number of encoder blocks")
     parser.add_argument("--num_decoder_blocks", type=int, default=2, help="Number of decoder blocks")
-    parser.add_argument("--num_groups", type=int, default=8, help="Number of attention heads")
+    parser.add_argument("--num_groups", type=int, default=4, help="Number of attention heads")
     parser.add_argument("--nerf_fusion", type=str, default="concat",
                        choices=["concat", "add", "attention"],
                        help="Multi-scale feature fusion type")
