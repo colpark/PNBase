@@ -1,18 +1,19 @@
 """
-PixNerDiT with Extended Boundaries and Position Jittering
+PixNerDiT with Extended Boundaries - Proper Overlap Supervision
 
 This variant improves super-resolution quality through:
-1. Extended patch boundaries: Predict beyond [0,1] to reduce seam artifacts
-2. Position jittering: Small noise during training for smoother NF learning
-3. Overlap blending: Seamless patch stitching during inference
+1. Extended patch boundaries: Predict actual neighbor pixels, not just rescaled coordinates
+2. Overlapping region supervision: Adjacent patches predict same pixels → consistency
+3. Ground truth supervision: Extended predictions compared against real pixel values
 
-Key differences from standard PixNerDiT:
-- NerfEmbedder predicts positions in [-margin, 1+margin] range
-- Training adds Gaussian noise to coordinates
-- Inference blends overlapping patch regions
+Key insight: Each patch predicts beyond its boundary into neighbor territory.
+Overlapping regions are supervised multiple times, enforcing consistency.
+
+During inference, overlapping predictions are blended for smooth output.
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from functools import lru_cache
 from src.models.layers.attention_op import attention
@@ -103,14 +104,16 @@ class FlattenDiTBlock(nn.Module):
 
 class ExtendedNerfEmbedder(nn.Module):
     """
-    NerfEmbedder with extended boundaries and position jittering.
+    NerfEmbedder with extended boundaries for proper overlap supervision.
+
+    Position encoding spans [-margin, 1+margin] to match extended patch pixels.
+    No jittering by default - overlapping regions must be consistent.
 
     Args:
         in_channels: Input channels
         hidden_size: Output dimension
         max_freqs: Maximum frequency for position encoding
         margin: Extension beyond [0,1] (e.g., 0.25 means [-0.25, 1.25])
-        jitter_std: Position jittering std during training
     """
     def __init__(
         self,
@@ -118,55 +121,40 @@ class ExtendedNerfEmbedder(nn.Module):
         hidden_size: int,
         max_freqs: int = 8,
         margin: float = 0.25,
-        jitter_std: float = 0.01,
     ):
         super().__init__()
         self.max_freqs = max_freqs
         self.hidden_size = hidden_size
         self.margin = margin
-        self.jitter_std = jitter_std
 
         self.embedder = nn.Sequential(
             nn.Linear(in_channels + max_freqs ** 2, hidden_size, bias=True),
         )
 
     @lru_cache(maxsize=64)
-    def _get_base_pos(self, height, width, device_str):
-        """Get base position grid (cached)."""
-        device = torch.device(device_str)
+    def _get_pos_encoding(self, height, width, device_str, dtype_str):
+        """
+        Compute position encoding for extended grid (cached).
 
-        # Extended range: [-margin, 1+margin] mapped to position space
-        # Standard range is [0, 16], so extended is [-margin*16, (1+margin)*16]
+        Positions span [-margin, 1+margin] in normalized coordinates,
+        mapped to [-margin*16, (1+margin)*16] in the position encoding space.
+        """
+        device = torch.device(device_str)
+        dtype = getattr(torch, dtype_str)
+
+        # Extended range in position encoding space
         start = -self.margin * 16
         end = (1 + self.margin) * 16
 
-        y_pos = torch.linspace(start, end, height, device=device)
-        x_pos = torch.linspace(start, end, width, device=device)
-
-        return y_pos, x_pos
-
-    def fetch_pos(self, patch_size_h, patch_size_w, device, dtype):
-        """
-        Compute position encoding with extended boundaries.
-
-        During training, adds jittering noise to positions.
-        """
-        y_pos, x_pos = self._get_base_pos(patch_size_h, patch_size_w, str(device))
-        y_pos = y_pos.to(dtype=dtype)
-        x_pos = x_pos.to(dtype=dtype)
+        y_pos = torch.linspace(start, end, height, device=device, dtype=dtype)
+        x_pos = torch.linspace(start, end, width, device=device, dtype=dtype)
 
         # Create meshgrid
         y_grid, x_grid = torch.meshgrid(y_pos, x_pos, indexing="ij")
         y_flat = y_grid.reshape(-1)
         x_flat = x_grid.reshape(-1)
 
-        # Apply jittering during training
-        if self.training and self.jitter_std > 0:
-            jitter_scale = self.jitter_std * 16.0  # Scale to coordinate system
-            y_flat = y_flat + torch.randn_like(y_flat) * jitter_scale
-            x_flat = x_flat + torch.randn_like(x_flat) * jitter_scale
-
-        # Compute Fourier features using sin/cos (avoids complex dtype issues with bfloat16)
+        # Compute Fourier features using sin/cos (bfloat16 compatible)
         dim = self.max_freqs ** 2 * 2
         theta = 10000.0
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 4, device=device, dtype=dtype)[: (dim // 4)] / dim))
@@ -174,25 +162,23 @@ class ExtendedNerfEmbedder(nn.Module):
         x_freqs = torch.outer(x_flat, freqs)
         y_freqs = torch.outer(y_flat, freqs)
 
-        # Use sin/cos directly instead of torch.polar (which requires complex dtype)
         x_cos = torch.cos(x_freqs)
         x_sin = torch.sin(x_freqs)
         y_cos = torch.cos(y_freqs)
         y_sin = torch.sin(y_freqs)
 
-        # Combine into position encoding [x_cos, y_cos, x_sin, y_sin]
         pos_encoding = torch.cat([x_cos, y_cos, x_sin, y_sin], dim=-1)
         pos_encoding = pos_encoding[:, :self.max_freqs ** 2]
 
-        return pos_encoding.unsqueeze(0)
+        return pos_encoding
 
     def forward(self, inputs, patch_size_h, patch_size_w):
         """
-        Forward pass with extended boundaries and jittering.
+        Forward pass with extended position encoding.
 
         Args:
-            inputs: [B, N, C] pixel values
-            patch_size_h, patch_size_w: Patch dimensions
+            inputs: [B, N, C] pixel values from extended patch
+            patch_size_h, patch_size_w: Extended patch dimensions
 
         Returns:
             [B, N, hidden_size] encoded features
@@ -201,8 +187,10 @@ class ExtendedNerfEmbedder(nn.Module):
         device = inputs.device
         dtype = inputs.dtype
 
-        pos = self.fetch_pos(patch_size_h, patch_size_w, device, dtype)
-        pos = pos.repeat(B, 1, 1)
+        # Get cached position encoding
+        dtype_str = str(dtype).split('.')[-1]  # e.g., 'bfloat16'
+        pos = self._get_pos_encoding(patch_size_h, patch_size_w, str(device), dtype_str)
+        pos = pos.unsqueeze(0).expand(B, -1, -1)
 
         inputs = torch.cat([inputs, pos], dim=-1)
         return self.embedder(inputs)
@@ -247,12 +235,23 @@ class NerfFinalLayer(nn.Module):
 
 class PixNerDiTExtended(nn.Module):
     """
-    Class-Conditional PixNerDiT with Extended Boundaries and Jittering.
+    Class-Conditional PixNerDiT with Extended Boundaries and Overlap Supervision.
 
     Key features:
-    1. Extended patch boundaries: Positions span [-margin, 1+margin]
-    2. Position jittering: Gaussian noise during training
-    3. Overlap blending: Seamless patches during inference
+    1. Extended patches: Each patch includes margin pixels from neighbors
+    2. Overlap supervision: Overlapping regions supervised against ground truth
+    3. Consistent predictions: Adjacent patches predict same values in overlap
+
+    Training flow:
+    1. Pad image with reflection
+    2. Extract extended patches (core + margin on all sides)
+    3. Encoder: processes core patches for global context
+    4. Decoder: predicts extended patches with NerfEmbedder
+    5. Loss: compare extended predictions vs ground truth extended patches
+
+    Inference flow:
+    1. Predict extended patches
+    2. Blend overlapping regions for smooth output
 
     Args:
         in_channels: Number of input channels (3 for RGB)
@@ -263,8 +262,7 @@ class PixNerDiTExtended(nn.Module):
         num_decoder_blocks: Number of decoder NerfBlocks
         patch_size: Base patch size for encoder
         num_classes: Number of classes
-        margin: Extended boundary margin (0.25 = predict 50% extra on each side)
-        jitter_std: Position jittering std (0.01 recommended)
+        margin: Extended boundary margin (0.25 = 25% extra on each side)
     """
     def __init__(
             self,
@@ -277,7 +275,6 @@ class PixNerDiTExtended(nn.Module):
             patch_size=2,
             num_classes=10,
             margin=0.25,
-            jitter_std=0.01,
             weight_path=None,
             load_ema=False,
     ):
@@ -292,23 +289,31 @@ class PixNerDiTExtended(nn.Module):
         self.num_blocks = self.num_encoder_blocks + self.num_decoder_blocks
         self.num_classes = num_classes
         self.margin = margin
-        self.jitter_std = jitter_std
+        self.patch_size = patch_size
+
+        # Compute extended patch size
+        # For patch_size=2, margin=0.25: margin_pixels=0 (too small)
+        # For patch_size=2, margin=0.5: margin_pixels=1
+        # We need at least 1 pixel margin, so we use ceil
+        self.margin_pixels = max(1, int(round(patch_size * margin)))
+        self.extended_size = patch_size + 2 * self.margin_pixels
+
+        # Actual margin ratio based on integer pixel count
+        self.effective_margin = self.margin_pixels / patch_size
 
         # Decoder patch scaling for super-resolution
         self.decoder_patch_scaling_h = 1.0
         self.decoder_patch_scaling_w = 1.0
-        self.patch_size = patch_size
 
         # Embedders
         self.s_embedder = Embed(in_channels * patch_size ** 2, hidden_size, bias=True)
 
-        # Extended NerfEmbedder with margin and jittering
+        # Extended NerfEmbedder (no jittering for consistency)
         self.x_embedder = ExtendedNerfEmbedder(
             in_channels=in_channels,
             hidden_size=decoder_hidden_size,
             max_freqs=8,
-            margin=margin,
-            jitter_std=jitter_std,
+            margin=self.effective_margin,
         )
 
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -352,12 +357,99 @@ class PixNerDiTExtended(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
+    def extract_extended_patches(self, x):
+        """
+        Extract extended patches from image.
+
+        Each patch includes margin_pixels on all sides from neighbors.
+        Uses reflection padding at image boundaries.
+
+        Args:
+            x: [B, C, H, W] input image
+
+        Returns:
+            extended_patches: [B, num_patches, extended_size^2 * C]
+            core_patches: [B, num_patches, patch_size^2 * C]
+        """
+        B, C, H, W = x.shape
+
+        # Pad image for extended patches
+        x_padded = F.pad(x, (self.margin_pixels,) * 4, mode='reflect')
+
+        # Extract extended patches using unfold
+        # unfold extracts patches of size extended_size with stride patch_size
+        # This gives overlapping patches where each sees its neighbors
+        patches = x_padded.unfold(2, self.extended_size, self.patch_size)
+        patches = patches.unfold(3, self.extended_size, self.patch_size)
+        # patches: [B, C, num_h, num_w, extended_size, extended_size]
+
+        num_h, num_w = patches.shape[2], patches.shape[3]
+
+        # Reshape to [B, num_patches, C * extended_size * extended_size]
+        patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous()
+        extended_patches = patches.view(B, num_h * num_w, C * self.extended_size * self.extended_size)
+
+        # Also extract core patches for encoder (non-overlapping)
+        core_patches = F.unfold(x, kernel_size=self.patch_size, stride=self.patch_size)
+        core_patches = core_patches.transpose(1, 2)  # [B, num_patches, C * patch_size^2]
+
+        return extended_patches, core_patches, (num_h, num_w)
+
+    def fold_extended_patches(self, patches, output_size, grid_shape):
+        """
+        Fold extended patches back into image with blending.
+
+        Overlapping regions are averaged for smooth transitions.
+
+        Args:
+            patches: [B, num_patches, C * extended_size * extended_size]
+            output_size: (H, W) target output size
+            grid_shape: (num_h, num_w) patch grid dimensions
+
+        Returns:
+            image: [B, C, H, W]
+        """
+        B = patches.shape[0]
+        H, W = output_size
+        num_h, num_w = grid_shape
+        C = self.in_channels
+
+        # Reshape patches
+        patches = patches.view(B, num_h, num_w, C, self.extended_size, self.extended_size)
+
+        # Create output and weight accumulator (padded)
+        H_pad = H + 2 * self.margin_pixels
+        W_pad = W + 2 * self.margin_pixels
+        output = torch.zeros(B, C, H_pad, W_pad, device=patches.device, dtype=patches.dtype)
+        weights = torch.zeros(1, 1, H_pad, W_pad, device=patches.device, dtype=patches.dtype)
+
+        # Place each patch with accumulation
+        for i in range(num_h):
+            for j in range(num_w):
+                y_start = i * self.patch_size
+                x_start = j * self.patch_size
+
+                patch = patches[:, i, j]  # [B, C, extended_size, extended_size]
+                output[:, :, y_start:y_start + self.extended_size,
+                       x_start:x_start + self.extended_size] += patch
+                weights[:, :, y_start:y_start + self.extended_size,
+                        x_start:x_start + self.extended_size] += 1.0
+
+        # Average overlapping regions
+        output = output / weights.clamp(min=1.0)
+
+        # Crop to original size (remove padding)
+        output = output[:, :, self.margin_pixels:self.margin_pixels + H,
+                        self.margin_pixels:self.margin_pixels + W]
+
+        return output
+
     def forward(self, x, t, y):
         """
-        Forward pass with extended boundaries.
+        Forward pass with extended boundary supervision.
 
-        The NerfEmbedder now predicts positions in [-margin, 1+margin],
-        and applies jittering during training.
+        Training: Predicts extended patches, loss computed against GT extended patches
+        Inference: Predicts extended patches, blends overlapping regions
 
         Args:
             x: Input tensor [B, C, H, W]
@@ -367,7 +459,7 @@ class PixNerDiTExtended(nn.Module):
         Returns:
             Predicted velocity field [B, C, H, W]
         """
-        B, _, H, W = x.shape
+        B, C, H, W = x.shape
 
         # Compute encoder resolution
         encoder_h = int(H / self.decoder_patch_scaling_h)
@@ -375,26 +467,42 @@ class PixNerDiTExtended(nn.Module):
         decoder_patch_size_h = int(self.patch_size * self.decoder_patch_scaling_h)
         decoder_patch_size_w = int(self.patch_size * self.decoder_patch_scaling_w)
 
-        # Downsample for encoder path
-        x_for_encoder = torch.nn.functional.interpolate(x, (encoder_h, encoder_w))
+        # Scale margin pixels for decoder
+        margin_h = int(self.margin_pixels * self.decoder_patch_scaling_h)
+        margin_w = int(self.margin_pixels * self.decoder_patch_scaling_w)
+        extended_h = decoder_patch_size_h + 2 * margin_h
+        extended_w = decoder_patch_size_w + 2 * margin_w
 
-        # Patchify
-        x_for_encoder = torch.nn.functional.unfold(
-            x_for_encoder, kernel_size=self.patch_size, stride=self.patch_size
-        ).transpose(1, 2)
-        x_for_decoder = torch.nn.functional.unfold(
-            x, kernel_size=(decoder_patch_size_h, decoder_patch_size_w),
-            stride=(decoder_patch_size_h, decoder_patch_size_w)
-        ).transpose(1, 2)
+        # Downsample for encoder path
+        x_for_encoder = F.interpolate(x, (encoder_h, encoder_w)) if (encoder_h != H or encoder_w != W) else x
+
+        # Extract patches for encoder (core only, non-overlapping)
+        x_for_encoder = F.unfold(x_for_encoder, kernel_size=self.patch_size, stride=self.patch_size)
+        x_for_encoder = x_for_encoder.transpose(1, 2)  # [B, num_patches, C * patch_size^2]
+
+        # Extract extended patches for decoder (includes neighbor pixels)
+        x_padded = F.pad(x, (margin_w, margin_w, margin_h, margin_h), mode='reflect')
+
+        # Use unfold to extract extended patches with core stride
+        extended_patches = x_padded.unfold(2, extended_h, decoder_patch_size_h)
+        extended_patches = extended_patches.unfold(3, extended_w, decoder_patch_size_w)
+        # extended_patches: [B, C, num_h, num_w, extended_h, extended_w]
+
+        num_h, num_w = extended_patches.shape[2], extended_patches.shape[3]
+        num_patches = num_h * num_w
+
+        # Reshape for decoder: [B * num_patches, extended_h * extended_w, C]
+        extended_patches = extended_patches.permute(0, 2, 3, 4, 5, 1).contiguous()
+        extended_patches = extended_patches.view(B, num_patches, extended_h * extended_w, C)
+        x_for_decoder = extended_patches.view(B * num_patches, extended_h * extended_w, C)
 
         # Position embeddings for encoder
         xpos = self.fetch_pos(encoder_h // self.patch_size, encoder_w // self.patch_size, x.device)
 
         # Time and class embeddings
-        t = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
-        y = self.y_embedder(y).view(B, 1, self.hidden_size)
-
-        condition = nn.functional.silu(t + y)
+        t_emb = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
+        y_emb = self.y_embedder(y).view(B, 1, self.hidden_size)
+        condition = F.silu(t_emb + y_emb)
 
         # Encoder path
         s = self.s_embedder(x_for_encoder)
@@ -402,30 +510,46 @@ class PixNerDiTExtended(nn.Module):
             s = self.blocks[i](s, condition, xpos)
 
         # Prepare for decoder
-        s = torch.nn.functional.silu(t + s)
-        batch_size, length, _ = s.shape
-        x = x_for_decoder.reshape(batch_size * length, self.in_channels, decoder_patch_size_h * decoder_patch_size_w)
-        x = x.transpose(1, 2)
-        s = s.view(batch_size * length, self.hidden_size)
+        s = F.silu(t_emb + s)
+        s = s.view(B * num_patches, self.hidden_size)
 
-        # Extended NerfEmbedder - with margin and jittering!
-        x = self.x_embedder(x, decoder_patch_size_h, decoder_patch_size_w)
+        # Extended NerfEmbedder - predicts for positions in [-margin, 1+margin]
+        x_decoded = self.x_embedder(x_for_decoder, extended_h, extended_w)
 
         # Decoder path
         for i in range(self.num_decoder_blocks):
-            x = self.blocks[i + self.num_encoder_blocks](x, s)
+            x_decoded = self.blocks[i + self.num_encoder_blocks](x_decoded, s)
 
-        # Final layer and unpatchify
-        x = self.final_layer(x)
-        x = x.transpose(1, 2)
-        x = x.reshape(batch_size, length, -1)
-        x = torch.nn.functional.fold(
-            x.transpose(1, 2).contiguous(),
-            (H, W),
-            kernel_size=(decoder_patch_size_h, decoder_patch_size_w),
-            stride=(decoder_patch_size_h, decoder_patch_size_w)
-        )
-        return x
+        # Final layer: [B * num_patches, extended_h * extended_w, C]
+        x_decoded = self.final_layer(x_decoded)
+
+        # Reshape back to patches: [B, num_patches, C, extended_h, extended_w]
+        x_decoded = x_decoded.view(B, num_patches, extended_h, extended_w, C)
+        x_decoded = x_decoded.permute(0, 1, 4, 2, 3).contiguous()
+        x_decoded = x_decoded.view(B, num_h, num_w, C, extended_h, extended_w)
+
+        # Fold with blending
+        H_pad = H + 2 * margin_h
+        W_pad = W + 2 * margin_w
+        output = torch.zeros(B, C, H_pad, W_pad, device=x.device, dtype=x.dtype)
+        weights = torch.zeros(1, 1, H_pad, W_pad, device=x.device, dtype=x.dtype)
+
+        for i in range(num_h):
+            for j in range(num_w):
+                y_start = i * decoder_patch_size_h
+                x_start = j * decoder_patch_size_w
+
+                patch = x_decoded[:, i, j]
+                output[:, :, y_start:y_start + extended_h, x_start:x_start + extended_w] += patch
+                weights[:, :, y_start:y_start + extended_h, x_start:x_start + extended_w] += 1.0
+
+        # Average overlapping regions
+        output = output / weights.clamp(min=1.0)
+
+        # Crop to original size
+        output = output[:, :, margin_h:margin_h + H, margin_w:margin_w + W]
+
+        return output
 
 
 # Alias

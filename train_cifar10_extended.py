@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
 """
-CIFAR-10 Training with Extended Boundaries and Position Jittering
+CIFAR-10 Training with Extended Boundaries and Overlap Supervision
 
-This training script uses PixNerDiTExtended which improves NF quality through:
-1. Extended patch boundaries: Predict [-margin, 1+margin] instead of [0, 1]
-2. Position jittering: Small Gaussian noise to coordinates during training
+This training script uses PixNerDiTExtended which improves NF quality through
+proper overlap supervision - each patch predicts extended regions that include
+actual neighbor pixels, and overlapping predictions are supervised against
+ground truth for consistency.
 
-Key ideas:
-- Extended boundaries allow overlapping patches → reduced seam artifacts
-- Position jittering forces continuous NF learning → better interpolation
+Key innovations:
+1. Extended patches: Each patch predicts beyond its boundary into neighbor territory
+2. Overlap supervision: Overlapping regions supervised against actual pixel values
+3. Consistency: Adjacent patches must predict same values in shared regions
+4. Blending: During inference, overlapping predictions are averaged for smooth output
+
+How it works:
+- With patch_size=2 and margin=0.5: margin_pixels=1, extended_size=4
+- Each 2x2 patch predicts a 4x4 region (includes 1 pixel from each neighbor)
+- The 4x4 prediction is compared against actual 4x4 pixels from the padded image
+- Overlapping regions get supervised multiple times → forces consistency
+
+No jittering: Since overlapping regions must match exactly, position jittering
+is disabled. The consistency constraint provides regularization instead.
 
 Usage:
     python train_cifar10_extended.py
 
-    # Adjust margin and jittering
-    python train_cifar10_extended.py --margin 0.25 --jitter_std 0.01
+    # Adjust margin (0.5 = 1 pixel overlap for patch_size=2)
+    python train_cifar10_extended.py --margin 0.5
 
 After training, use cifar10_extended_superres_inference.ipynb for generation.
 """
@@ -83,10 +95,11 @@ def parse_args():
     parser.add_argument("--num_groups", type=int, default=4, help="Number of attention heads")
 
     # Extended NerfEmbedder config - KEY INNOVATION!
-    parser.add_argument("--margin", type=float, default=0.25,
-                       help="Extended boundary margin (0.25 = predict [-0.25, 1.25])")
-    parser.add_argument("--jitter_std", type=float, default=0.01,
-                       help="Position jittering std during training")
+    # margin controls how much each patch extends into neighbor territory
+    # With margin=0.5 and patch_size=2: margin_pixels=1, extended_size=4
+    # Overlapping regions are supervised against ground truth for consistency
+    parser.add_argument("--margin", type=float, default=0.5,
+                       help="Extended boundary margin (0.5 = 1 pixel margin for patch_size=2)")
 
     # Sampler config
     parser.add_argument("--guidance", type=float, default=2.0, help="CFG guidance scale")
@@ -122,6 +135,8 @@ def build_model(args):
     conditioner = LabelConditioner(num_classes=10)
 
     # Denoiser with EXTENDED NerfEmbedder
+    # Each patch predicts extended region including neighbor pixels
+    # Overlapping predictions are supervised against ground truth
     denoiser = PixNerDiTExtended(
         in_channels=3,
         patch_size=args.patch_size,
@@ -131,8 +146,7 @@ def build_model(args):
         num_encoder_blocks=args.num_encoder_blocks,
         num_decoder_blocks=args.num_decoder_blocks,
         num_classes=10,
-        margin=args.margin,              # Extended boundaries!
-        jitter_std=args.jitter_std,      # Position jittering!
+        margin=args.margin,  # Extended boundaries with overlap supervision
     )
 
     # Sampler
@@ -214,18 +228,29 @@ def build_datamodule(args):
 def main():
     args = parse_args()
 
+    # Compute actual pixel margins
+    margin_pixels = max(1, int(round(args.patch_size * args.margin)))
+    extended_size = args.patch_size + 2 * margin_pixels
+    effective_margin = margin_pixels / args.patch_size
+
     print("=" * 70)
-    print("CIFAR-10 Training with Extended Boundaries and Position Jittering")
+    print("CIFAR-10 Training with Extended Boundaries and Overlap Supervision")
     print("=" * 70)
     print()
-    print("KEY INNOVATIONS:")
-    print(f"  1. Extended boundaries: margin={args.margin}")
-    print(f"     → Positions span [{-args.margin:.2f}, {1+args.margin:.2f}] instead of [0, 1]")
-    print(f"     → Reduces seam artifacts at patch boundaries")
+    print("KEY INNOVATION: Proper overlap supervision for consistent predictions")
     print()
-    print(f"  2. Position jittering: std={args.jitter_std}")
-    print(f"     → Adds Gaussian noise to coordinates during training")
-    print(f"     → Forces smoother NF learning for better interpolation")
+    print(f"  Patch configuration:")
+    print(f"    • patch_size: {args.patch_size}")
+    print(f"    • margin: {args.margin} → margin_pixels: {margin_pixels}")
+    print(f"    • extended_size: {extended_size} (core {args.patch_size} + {margin_pixels} on each side)")
+    print(f"    • effective_margin: {effective_margin:.2f}")
+    print()
+    print(f"  How it works:")
+    print(f"    • Each patch predicts {extended_size}x{extended_size} pixels (not just {args.patch_size}x{args.patch_size})")
+    print(f"    • Extended region includes actual neighbor pixels from the image")
+    print(f"    • Overlapping regions are supervised against ground truth")
+    print(f"    • Adjacent patches must predict same values → consistency!")
+    print(f"    • During inference, overlapping predictions are blended")
     print()
     print(f"Full config: {vars(args)}")
     print()
