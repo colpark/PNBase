@@ -92,7 +92,7 @@ def parse_args():
 
     # Checkpointing
     parser.add_argument("--save_every_n_steps", type=int, default=5000, help="Checkpoint frequency")
-    parser.add_argument("--val_check_interval", type=int, default=5000, help="Validation frequency")
+    parser.add_argument("--val_every_n_epochs", type=int, default=10, help="Validation every N epochs")
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
     # Hardware
@@ -260,7 +260,7 @@ def main():
         devices=args.devices,
         precision=args.precision,
         max_steps=args.max_steps,
-        val_check_interval=args.val_check_interval,
+        check_val_every_n_epoch=args.val_every_n_epochs,
         log_every_n_steps=50,
         logger=logger,
         callbacks=callbacks,
