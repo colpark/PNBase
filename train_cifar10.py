@@ -73,20 +73,22 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
 
-    # Model config (smaller defaults for CIFAR-10)
-    parser.add_argument("--hidden_size", type=int, default=256, help="Encoder hidden dimension")
-    parser.add_argument("--decoder_hidden_size", type=int, default=32, help="Decoder hidden dimension")
-    parser.add_argument("--num_encoder_blocks", type=int, default=6, help="Number of encoder blocks")
+    # Model config for CIFAR-10 with super-resolution support
+    # patch_size=8 means 4x4=16 encoder tokens, but NerfEmbedder sees 64 positions
+    # This is critical for super-resolution (smaller patch_size only sees corner positions)
+    parser.add_argument("--hidden_size", type=int, default=512, help="Encoder hidden dimension")
+    parser.add_argument("--decoder_hidden_size", type=int, default=64, help="Decoder hidden dimension")
+    parser.add_argument("--num_encoder_blocks", type=int, default=8, help="Number of encoder blocks")
     parser.add_argument("--num_decoder_blocks", type=int, default=2, help="Number of decoder blocks")
-    parser.add_argument("--patch_size", type=int, default=2, help="Patch size (32/patch_size = num patches)")
-    parser.add_argument("--num_groups", type=int, default=4, help="Number of attention heads")
+    parser.add_argument("--patch_size", type=int, default=8, help="Patch size (32/8=4x4=16 tokens, sees 64 positions)")
+    parser.add_argument("--num_groups", type=int, default=8, help="Number of attention heads")
 
     # Sampler config
     parser.add_argument("--guidance", type=float, default=2.0, help="CFG guidance scale")
     parser.add_argument("--num_sample_steps", type=int, default=50, help="Sampling steps")
 
     # Logging
-    parser.add_argument("--exp_name", type=str, default="cifar10_c2i_heavydecoder", help="Experiment name")
+    parser.add_argument("--exp_name", type=str, default="cifar10_c2i_superres", help="Experiment name")
     parser.add_argument("--output_dir", type=str, default="./workdirs", help="Output directory")
     parser.add_argument("--use_wandb", action="store_true", help="Use Weights & Biases logging")
     parser.add_argument("--wandb_project", type=str, default="pixnerd_cifar10", help="W&B project name")
