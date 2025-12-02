@@ -266,6 +266,7 @@ def main():
         precision=args.precision,
         max_steps=args.max_steps,
         check_val_every_n_epoch=args.val_every_n_epochs,
+        num_sanity_val_steps=0,  # Skip sanity check (causes issues with SaveImagesHook on resume)
         log_every_n_steps=50,
         logger=logger,
         callbacks=callbacks,
