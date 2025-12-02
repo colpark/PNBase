@@ -32,17 +32,20 @@ if PIXNERD_DIR.exists():
 import torch
 from lightning import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
-from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.loggers import WandbLogger, CSVLogger
+
+# Check if tensorboard is actually available (not just the logger class)
 try:
-    from lightning.pytorch.loggers import TensorBoardLogger
+    import tensorboard
     TENSORBOARD_AVAILABLE = True
+    from lightning.pytorch.loggers import TensorBoardLogger
 except (ImportError, ModuleNotFoundError):
-    TENSORBOARD_AVAILABLE = False
-try:
-    from lightning.pytorch.loggers import CSVLogger
-    CSV_AVAILABLE = True
-except (ImportError, ModuleNotFoundError):
-    CSV_AVAILABLE = False
+    try:
+        import tensorboardX
+        TENSORBOARD_AVAILABLE = True
+        from lightning.pytorch.loggers import TensorBoardLogger
+    except (ImportError, ModuleNotFoundError):
+        TENSORBOARD_AVAILABLE = False
 
 from src.models.autoencoder.pixel import PixelAE
 from src.models.conditioner.class_label import LabelConditioner
@@ -229,15 +232,12 @@ def main():
             save_dir=str(output_dir),
             name="logs",
         )
-    elif CSV_AVAILABLE:
+    else:
         logger = CSVLogger(
             save_dir=str(output_dir),
             name="logs",
         )
         print("Using CSVLogger (tensorboard not available)")
-    else:
-        logger = None
-        print("No logger available (training will proceed without logging)")
 
     # Callbacks
     callbacks = [
