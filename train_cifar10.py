@@ -32,7 +32,17 @@ if PIXNERD_DIR.exists():
 import torch
 from lightning import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
-from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
+from lightning.pytorch.loggers import WandbLogger
+try:
+    from lightning.pytorch.loggers import TensorBoardLogger
+    TENSORBOARD_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    TENSORBOARD_AVAILABLE = False
+try:
+    from lightning.pytorch.loggers import CSVLogger
+    CSV_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    CSV_AVAILABLE = False
 
 from src.models.autoencoder.pixel import PixelAE
 from src.models.conditioner.class_label import LabelConditioner
@@ -56,13 +66,13 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
 
-    # Model config
-    parser.add_argument("--hidden_size", type=int, default=512, help="Encoder hidden dimension")
-    parser.add_argument("--decoder_hidden_size", type=int, default=64, help="Decoder hidden dimension")
-    parser.add_argument("--num_encoder_blocks", type=int, default=12, help="Number of encoder blocks")
+    # Model config (smaller defaults for CIFAR-10)
+    parser.add_argument("--hidden_size", type=int, default=256, help="Encoder hidden dimension")
+    parser.add_argument("--decoder_hidden_size", type=int, default=32, help="Decoder hidden dimension")
+    parser.add_argument("--num_encoder_blocks", type=int, default=6, help="Number of encoder blocks")
     parser.add_argument("--num_decoder_blocks", type=int, default=2, help="Number of decoder blocks")
     parser.add_argument("--patch_size", type=int, default=2, help="Patch size (32/patch_size = num patches)")
-    parser.add_argument("--num_groups", type=int, default=8, help="Number of attention heads")
+    parser.add_argument("--num_groups", type=int, default=4, help="Number of attention heads")
 
     # Sampler config
     parser.add_argument("--guidance", type=float, default=2.0, help="CFG guidance scale")
@@ -214,11 +224,20 @@ def main():
             name=args.exp_name,
             save_dir=str(output_dir),
         )
-    else:
+    elif TENSORBOARD_AVAILABLE:
         logger = TensorBoardLogger(
             save_dir=str(output_dir),
             name="logs",
         )
+    elif CSV_AVAILABLE:
+        logger = CSVLogger(
+            save_dir=str(output_dir),
+            name="logs",
+        )
+        print("Using CSVLogger (tensorboard not available)")
+    else:
+        logger = None
+        print("No logger available (training will proceed without logging)")
 
     # Callbacks
     callbacks = [
