@@ -163,7 +163,7 @@ class ExtendedNerfEmbedder(nn.Module):
             y_pos = y_pos + torch.randn_like(y_pos) * noise_scale
             x_pos = x_pos + torch.randn_like(x_pos) * noise_scale
 
-        # Compute Fourier features (similar to precompute_freqs_cis_2d but inline)
+        # Compute Fourier features using sin/cos directly (avoids complex dtype issues with bfloat16)
         dim = self.max_freqs ** 2 * 2
         theta = 10000.0
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 4, device=device, dtype=dtype)[: (dim // 4)] / dim))
@@ -171,18 +171,17 @@ class ExtendedNerfEmbedder(nn.Module):
         x_freqs = torch.outer(x_pos, freqs)  # [N, dim/4]
         y_freqs = torch.outer(y_pos, freqs)  # [N, dim/4]
 
-        x_cis = torch.polar(torch.ones_like(x_freqs), x_freqs)
-        y_cis = torch.polar(torch.ones_like(y_freqs), y_freqs)
+        # Use sin/cos directly instead of torch.polar (which requires complex dtype)
+        x_cos = torch.cos(x_freqs)
+        x_sin = torch.sin(x_freqs)
+        y_cos = torch.cos(y_freqs)
+        y_sin = torch.sin(y_freqs)
 
-        # Combine x and y
-        freqs_cis = torch.cat([x_cis.unsqueeze(dim=-1), y_cis.unsqueeze(dim=-1)], dim=-1)
-        freqs_cis = freqs_cis.reshape(patch_size_h * patch_size_w, -1)
+        # Interleave x and y components: [x_cos, y_cos, x_sin, y_sin]
+        # This maintains similar structure to the complex representation
+        pos_encoding = torch.cat([x_cos, y_cos, x_sin, y_sin], dim=-1)
 
-        # Convert complex to real (take real part for position encoding)
-        # Stack real and imaginary parts
-        pos_encoding = torch.cat([freqs_cis.real, freqs_cis.imag], dim=-1)
-
-        # Truncate to expected size
+        # Truncate to expected size (max_freqs ** 2)
         pos_encoding = pos_encoding[:, :self.max_freqs ** 2]
 
         return pos_encoding
