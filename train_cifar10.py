@@ -58,6 +58,7 @@ from src.diffusion.flow_matching.sampling import EulerSampler, ode_step_fn
 from src.diffusion.base.guidance import simple_guidance_fn
 from src.diffusion.flow_matching.training import FlowMatchingTrainer
 from src.callbacks.simple_ema import SimpleEMA
+from src.callbacks.save_images import SaveImagesHook
 from src.lightning_model import LightningModel
 from src.lightning_data import DataModule
 from src.data.dataset.cifar10 import PixCIFAR10, CIFAR10RandomNDataset
@@ -251,6 +252,10 @@ def main():
             save_last=True,
         ),
         LearningRateMonitor(logging_interval="step"),
+        SaveImagesHook(
+            save_dir="val",
+            save_compressed=True,
+        ),
     ]
 
     # Trainer
