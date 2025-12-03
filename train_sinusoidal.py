@@ -2,32 +2,34 @@
 """
 Sinusoidal Function Neural Field Interpolation Benchmark
 
-This benchmark tests PixNerd's neural field interpolation capabilities:
-- Training: Model sees only 20% of pixels (regular stripe intervals)
-- Testing: Model must predict the unseen 80%
-- Direct measurement of NerfEmbedder interpolation quality
+This benchmark tests PixNerd's neural field interpolation capabilities using
+regular grid sampling to simulate super-resolution.
 
-Key insight:
-- The encoder processes the full noisy image (global context)
-- The decoder predicts pixel values at all positions via NerfEmbedder
-- During training, loss is computed only on visible 20%
-- At evaluation, we measure reconstruction quality on unseen 80%
+Key concept:
+- Training: Model sees regularly sampled pixels (like low-res input)
+- Testing: Model must predict ALL pixels (super-resolution)
+- This directly tests NerfEmbedder's interpolation quality
 
-Visibility pattern (default):
-- Visible columns: [0%, 5%], [30%, 35%], [50%, 55%], [70%, 75%]
-- Total visible: 20%
-- This creates regular "stripe" pattern of seen/unseen regions
+Super-resolution simulation:
+- downsample_factor=5: Every 5th pixel visible = 5x super-res (4% visible in 2D grid)
+- downsample_factor=4: Every 4th pixel visible = 4x super-res (6.25% visible)
+- downsample_factor=2: Every 2nd pixel visible = 2x super-res (25% visible)
+
+Example: resolution=64, downsample_factor=4
+- Low-res equivalent: 16x16 (256 pixels visible)
+- High-res target: 64x64 (4096 pixels total)
+- Model learns to upscale 4x via neural field interpolation
 
 Usage:
     python train_sinusoidal.py
 
-    # Custom resolution and components
-    python train_sinusoidal.py --resolution 64 --num_components 5
+    # 4x super-resolution (every 4th pixel)
+    python train_sinusoidal.py --downsample_factor 4
 
-    # Different visibility ratio
-    python train_sinusoidal.py --visible_ratio 0.1  # Only 10% visible
+    # Higher resolution with 2x super-res
+    python train_sinusoidal.py --resolution 128 --downsample_factor 2
 
-After training, evaluate interpolation quality on the unseen 80%.
+After training, evaluate interpolation quality on unseen pixels.
 """
 import os
 import sys
@@ -297,16 +299,16 @@ def parse_args():
     parser.add_argument("--num_samples", type=int, default=1000,
                        help="Number of unique sinusoidal patterns")
     parser.add_argument("--resolution", type=int, default=64,
-                       help="Image resolution")
+                       help="Image resolution (high-res target)")
     parser.add_argument("--num_components", type=int, default=5,
                        help="Number of sinusoidal components per image")
     parser.add_argument("--channels", type=int, default=1,
                        help="Number of channels (1=grayscale, 3=RGB)")
-    parser.add_argument("--visible_ratio", type=float, default=0.2,
-                       help="Fraction of pixels visible during training")
-    parser.add_argument("--mask_mode", type=str, default="columns",
+    parser.add_argument("--downsample_factor", type=int, default=4,
+                       help="Super-res factor: sample every Nth pixel (4=4x, 5=5x)")
+    parser.add_argument("--mask_mode", type=str, default="grid",
                        choices=["columns", "rows", "grid"],
-                       help="Visibility mask pattern")
+                       help="Sampling pattern: grid (2D), columns (1D-x), rows (1D-y)")
 
     # Training config
     parser.add_argument("--max_steps", type=int, default=50000,
@@ -357,32 +359,6 @@ def parse_args():
                        help="Number of GPUs")
 
     return parser.parse_args()
-
-
-def build_visibility_intervals(visible_ratio: float) -> list:
-    """
-    Build visibility intervals for a given ratio.
-
-    Creates regular stripe pattern where visible_ratio of pixels are shown.
-
-    Args:
-        visible_ratio: Fraction of pixels to show (e.g., 0.2 for 20%)
-
-    Returns:
-        List of (start, end) tuples in [0, 1]
-    """
-    # Number of stripes (we use 4 by default for 20%)
-    num_stripes = 4
-    stripe_width = visible_ratio / num_stripes
-
-    # Spread stripes evenly across [0, 1]
-    intervals = []
-    positions = [0.0, 0.30, 0.50, 0.70]  # Fixed positions for regularity
-
-    for pos in positions:
-        intervals.append((pos, pos + stripe_width))
-
-    return intervals
 
 
 def build_model(args):
@@ -447,18 +423,12 @@ def build_model(args):
 def build_datamodule(args):
     """Build the data module for sinusoidal dataset."""
 
-    # Build visibility intervals
-    visible_intervals = build_visibility_intervals(args.visible_ratio)
-
-    print(f"Visibility intervals: {visible_intervals}")
-    print(f"Total visible: {sum(e-s for s,e in visible_intervals):.1%}")
-
     train_dataset = SinusoidalDataset(
         num_samples=args.num_samples,
         resolution=args.resolution,
         num_components=args.num_components,
         channels=args.channels,
-        visible_intervals=visible_intervals,
+        downsample_factor=args.downsample_factor,
         mask_mode=args.mask_mode,
         seed=42,
     )
@@ -466,14 +436,14 @@ def build_datamodule(args):
     eval_dataset = SinusoidalRandomNDataset(
         latent_shape=(args.channels, args.resolution, args.resolution),
         max_num_instances=100,
-        visible_intervals=visible_intervals,
+        downsample_factor=args.downsample_factor,
         mask_mode=args.mask_mode,
     )
 
     pred_dataset = SinusoidalRandomNDataset(
         latent_shape=(args.channels, args.resolution, args.resolution),
         max_num_instances=100,
-        visible_intervals=visible_intervals,
+        downsample_factor=args.downsample_factor,
         mask_mode=args.mask_mode,
     )
 
@@ -493,22 +463,31 @@ def build_datamodule(args):
 def main():
     args = parse_args()
 
+    # Compute effective resolution and visible ratio
+    low_res = args.resolution // args.downsample_factor
+    if args.mask_mode == "grid":
+        visible_ratio = 1.0 / (args.downsample_factor ** 2)
+    else:
+        visible_ratio = 1.0 / args.downsample_factor
+
     print("=" * 70)
     print("Sinusoidal Neural Field Interpolation Benchmark")
     print("=" * 70)
     print()
-    print("PURPOSE: Test PixNerd's ability to interpolate between seen positions")
+    print("PURPOSE: Test PixNerd's super-resolution via neural field interpolation")
     print()
-    print(f"  Resolution: {args.resolution}x{args.resolution}")
+    print(f"  High-res target: {args.resolution}x{args.resolution}")
+    print(f"  Low-res input: {low_res}x{low_res} (every {args.downsample_factor}th pixel)")
+    print(f"  Super-resolution factor: {args.downsample_factor}x")
+    print(f"  Visible pixels: {visible_ratio:.1%}")
     print(f"  Channels: {args.channels}")
     print(f"  Sinusoidal components: {args.num_components}")
-    print(f"  Visible ratio: {args.visible_ratio:.0%}")
-    print(f"  Mask mode: {args.mask_mode}")
+    print(f"  Sampling mode: {args.mask_mode}")
     print()
     print("Training setup:")
-    print(f"  • Model sees {args.visible_ratio:.0%} of pixels (regular intervals)")
-    print(f"  • Loss computed ONLY on visible {args.visible_ratio:.0%}")
-    print(f"  • NerfEmbedder must interpolate to unseen {1-args.visible_ratio:.0%}")
+    print(f"  • Regular grid sampling (like low-res input)")
+    print(f"  • Loss computed ONLY on sampled {visible_ratio:.1%} pixels")
+    print(f"  • NerfEmbedder must interpolate to remaining {1-visible_ratio:.1%}")
     print()
     print(f"Config: {vars(args)}")
     print()
@@ -573,8 +552,8 @@ def main():
 
     # Train
     print("\nStarting training...")
-    print(f"  Training on {args.visible_ratio:.0%} of pixels")
-    print(f"  Testing interpolation on {1-args.visible_ratio:.0%}")
+    print(f"  Training on {visible_ratio:.1%} of pixels (low-res samples)")
+    print(f"  Testing interpolation on {1-visible_ratio:.1%} (super-res)")
     trainer.fit(
         pl_module,
         datamodule=datamodule,
@@ -585,7 +564,8 @@ def main():
     print("Training complete!")
     print(f"Checkpoints saved to: {output_dir / 'checkpoints'}")
     print()
-    print("Next: Evaluate interpolation quality on unseen 80%")
+    print(f"Super-resolution task: {args.downsample_factor}x upscaling")
+    print(f"Evaluate interpolation quality on unseen {1-visible_ratio:.1%} pixels")
     print("=" * 70)
 
 

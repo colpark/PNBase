@@ -5,14 +5,14 @@ This dataset generates 2D sinusoidal patterns for testing PixNerd's
 neural field interpolation capabilities.
 
 Key concept:
-- Training: Model sees only 20% of pixels (regular intervals)
-- Testing: Model must predict the unseen 80%
+- Training: Model sees regularly sampled pixels (simulating low-resolution input)
+- Testing: Model must predict all pixels (super-resolution)
 - This directly tests the NerfEmbedder's interpolation quality
 
-The visibility mask creates stripe patterns:
-- Visible columns: [0%, 5%], [30%, 35%], [50%, 55%], [70%, 75%]
-- Total visible: 20%
-- Unseen: 80% (for evaluation)
+Super-resolution simulation:
+- For 5x super-resolution: see every 5th pixel (20% visible)
+- For 4x super-resolution: see every 4th pixel (25% visible)
+- Regular grid sampling simulates downsampled low-res input
 """
 
 import torch
@@ -80,30 +80,62 @@ def generate_sinusoidal_image(
 
 def create_visibility_mask(
     resolution: int,
-    visible_intervals: List[Tuple[float, float]] = None,
+    downsample_factor: int = 5,
+    mode: str = "grid",
+) -> np.ndarray:
+    """
+    Create visibility mask for super-resolution simulation.
+
+    Uses regular grid sampling to simulate a downsampled low-resolution input.
+    This is the standard approach for super-resolution benchmarks.
+
+    Args:
+        resolution: Full image size (high-res)
+        downsample_factor: Sample every Nth pixel (e.g., 5 = 5x super-res = 20% visible)
+        mode: "grid" (both x and y), "columns" (x only), "rows" (y only)
+
+    Returns:
+        Boolean mask [H, W] where True = visible (low-res sample positions)
+
+    Examples:
+        downsample_factor=5: Every 5th pixel visible → 20% visible (5x super-res)
+        downsample_factor=4: Every 4th pixel visible → 25% visible (4x super-res)
+        downsample_factor=2: Every 2nd pixel visible → 50% visible (2x super-res)
+    """
+    mask = np.zeros((resolution, resolution), dtype=bool)
+
+    if mode == "grid":
+        # Regular 2D grid sampling (standard for super-resolution)
+        # Visible positions: (0, 0), (0, N), (0, 2N), ..., (N, 0), (N, N), ...
+        mask[::downsample_factor, ::downsample_factor] = True
+    elif mode == "columns":
+        # Only sample along x-axis (vertical stripes)
+        mask[:, ::downsample_factor] = True
+    elif mode == "rows":
+        # Only sample along y-axis (horizontal stripes)
+        mask[::downsample_factor, :] = True
+    else:
+        raise ValueError(f"Unknown mode: {mode}. Use 'grid', 'columns', or 'rows'")
+
+    return mask
+
+
+def create_visibility_mask_from_intervals(
+    resolution: int,
+    visible_intervals: List[Tuple[float, float]],
     mode: str = "columns",
 ) -> np.ndarray:
     """
-    Create visibility mask for training.
+    Create visibility mask from explicit intervals (legacy support).
 
     Args:
         resolution: Image size
         visible_intervals: List of (start, end) intervals in [0, 1]
-                          Default: [[0, 0.05], [0.3, 0.35], [0.5, 0.55], [0.7, 0.75]]
         mode: "columns", "rows", or "grid" (both)
 
     Returns:
         Boolean mask [H, W] where True = visible (training region)
     """
-    if visible_intervals is None:
-        # Default: 4 strips of 5% each = 20% visible
-        visible_intervals = [
-            (0.0, 0.05),
-            (0.30, 0.35),
-            (0.50, 0.55),
-            (0.70, 0.75),
-        ]
-
     mask = np.zeros((resolution, resolution), dtype=bool)
 
     for start, end in visible_intervals:
@@ -126,6 +158,10 @@ class SinusoidalDataset(Dataset):
     - image: Full sinusoidal pattern [C, H, W]
     - mask: Visibility mask (True = visible during training)
     - metadata: Dict with save function and parameters
+
+    Super-resolution simulation:
+    - Training sees regularly sampled pixels (like low-res input)
+    - Model must interpolate to full resolution
     """
 
     def __init__(
@@ -135,19 +171,19 @@ class SinusoidalDataset(Dataset):
         num_components: int = 5,
         freq_range: Tuple[float, float] = (1.0, 8.0),
         channels: int = 1,  # 1 for grayscale, 3 for RGB (same pattern per channel)
-        visible_intervals: List[Tuple[float, float]] = None,
-        mask_mode: str = "columns",
+        downsample_factor: int = 5,  # 5 = 5x super-res = every 5th pixel visible
+        mask_mode: str = "grid",
         seed: int = 42,
     ):
         """
         Args:
             num_samples: Number of unique sinusoidal patterns
-            resolution: Image resolution (square)
+            resolution: Image resolution (square) - the HIGH-RES target
             num_components: Number of sinusoidal components per image
             freq_range: Frequency range (cycles per image)
             channels: Number of channels (1 or 3)
-            visible_intervals: Visibility mask intervals
-            mask_mode: "columns", "rows", or "grid"
+            downsample_factor: Sample every Nth pixel (e.g., 5 = 20% visible, 4 = 25%)
+            mask_mode: "grid" (both x,y), "columns" (x only), "rows" (y only)
             seed: Base random seed
         """
         self.num_samples = num_samples
@@ -156,16 +192,23 @@ class SinusoidalDataset(Dataset):
         self.freq_range = freq_range
         self.channels = channels
         self.seed = seed
+        self.downsample_factor = downsample_factor
 
         # Create visibility mask (same for all samples)
+        # Regular grid sampling simulates low-resolution input
         self.visibility_mask = create_visibility_mask(
-            resolution, visible_intervals, mask_mode
+            resolution, downsample_factor, mask_mode
         )
         self.visible_ratio = self.visibility_mask.sum() / self.visibility_mask.size
 
-        print(f"SinusoidalDataset: {num_samples} samples, {resolution}x{resolution}")
+        # Effective low-res size
+        low_res = resolution // downsample_factor
+
+        print(f"SinusoidalDataset: {num_samples} samples")
+        print(f"  High-res: {resolution}x{resolution}")
+        print(f"  Low-res equivalent: {low_res}x{low_res} (downsample_factor={downsample_factor})")
         print(f"  Visible ratio: {self.visible_ratio:.1%}")
-        print(f"  Train on {self.visible_ratio:.1%}, test interpolation on {1-self.visible_ratio:.1%}")
+        print(f"  Super-resolution task: {downsample_factor}x upscaling")
 
     def __len__(self) -> int:
         return self.num_samples
@@ -230,16 +273,16 @@ class SinusoidalRandomNDataset(Dataset):
         self,
         latent_shape: Tuple[int, ...] = (1, 64, 64),
         max_num_instances: int = 100,
-        visible_intervals: List[Tuple[float, float]] = None,
-        mask_mode: str = "columns",
+        downsample_factor: int = 5,
+        mask_mode: str = "grid",
     ):
         self.latent_shape = latent_shape
         self.max_num_instances = max_num_instances
 
-        # Create visibility mask
+        # Create visibility mask (regular grid sampling)
         resolution = latent_shape[-1]
         self.visibility_mask = create_visibility_mask(
-            resolution, visible_intervals, mask_mode
+            resolution, downsample_factor, mask_mode
         )
 
     def __len__(self) -> int:
