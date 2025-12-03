@@ -240,8 +240,12 @@ class SinusoidalPLModule(pl.LightningModule):
         latents = self.model.vae.encode(images)
 
         # Compute masked flow matching loss
-        # Use first mask (same for all samples in batch)
-        mask = masks[0] if masks.dim() == 3 else masks
+        # Handle masks - could be tensor [B, H, W] or stacked tensor
+        if isinstance(masks, torch.Tensor):
+            mask = masks[0] if masks.dim() == 3 else masks
+        else:
+            # masks is a tuple/list from DataLoader, get first element
+            mask = masks[0] if isinstance(masks[0], torch.Tensor) else torch.stack(masks)[0]
 
         loss = self.model.diffusion_trainer(
             self.model.denoiser, latents, condition, mask=mask
