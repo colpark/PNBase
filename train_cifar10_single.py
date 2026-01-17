@@ -320,6 +320,11 @@ def main():
     print(f"Saved target image to: {output_dir / 'target_image.png'}")
     print(f"Target class: {train_dataset.class_name} ({train_dataset.label})")
 
+    # Save class label for evaluation
+    with open(output_dir / "training_class.txt", "w") as f:
+        f.write(str(train_dataset.label))
+    print(f"Saved class label to: {output_dir / 'training_class.txt'}")
+
     # Logger
     if TENSORBOARD_AVAILABLE:
         logger = TensorBoardLogger(
