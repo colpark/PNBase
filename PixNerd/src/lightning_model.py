@@ -50,10 +50,15 @@ class LightningModel(pl.LightningModule):
         self.eval_original_model = eval_original_model
 
         self._strict_loading = False
+        self._ema_initialized = False  # Track if EMA has been initialized
 
     def configure_model(self) -> None:
         self.trainer.strategy.barrier()
-        copy_params(src_model=self.denoiser, dst_model=self.ema_denoiser)
+        # Only copy params on fresh start, not when resuming from checkpoint
+        # When resuming, EMA weights are loaded via load_state_dict
+        if not self._ema_initialized:
+            copy_params(src_model=self.denoiser, dst_model=self.ema_denoiser)
+            self._ema_initialized = True
 
         # disable grad for conditioner and vae
         no_grad(self.conditioner)
@@ -148,3 +153,28 @@ class LightningModel(pl.LightningModule):
             prefix=prefix+"diffusion_trainer.",
             keep_vars=keep_vars)
         return destination
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        # Mark EMA as initialized since we're loading saved weights
+        self._ema_initialized = True
+
+        # Load denoiser weights
+        denoiser_state = {k[len("denoiser."):]: v for k, v in state_dict.items()
+                        if k.startswith("denoiser.")}
+        if denoiser_state:
+            self.denoiser.load_state_dict(denoiser_state, strict=False)
+
+        # Load EMA denoiser weights
+        ema_state = {k[len("ema_denoiser."):]: v for k, v in state_dict.items()
+                    if k.startswith("ema_denoiser.")}
+        if ema_state:
+            self.ema_denoiser.load_state_dict(ema_state, strict=False)
+
+        # Load diffusion trainer weights
+        trainer_state = {k[len("diffusion_trainer."):]: v for k, v in state_dict.items()
+                        if k.startswith("diffusion_trainer.")}
+        if trainer_state:
+            self.diffusion_trainer.load_state_dict(trainer_state, strict=False)
+
+        # Return empty missing/unexpected keys to satisfy Lightning
+        return torch.nn.modules.module._IncompatibleKeys([], [])

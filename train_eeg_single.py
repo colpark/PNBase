@@ -289,14 +289,18 @@ def build_model(args):
     )
 
     # Trainer (flow matching loss)
+    # For single-instance overfitting, disable CFG dropout (null_condition_p=0.0)
+    # so the model always sees the correct class label during training
     trainer = FlowMatchingTrainer(
         scheduler=main_scheduler,
         lognorm_t=True,
         timeshift=1.0,
+        null_condition_p=0.0,  # Disable CFG dropout for overfitting test
     )
 
-    # EMA
-    ema_tracker = SimpleEMA(decay=0.9999)
+    # EMA - use faster decay for single-instance overfitting
+    # 0.9999 is too slow for 5000 steps, 0.999 converges faster
+    ema_tracker = SimpleEMA(decay=0.999)
 
     # Optimizer
     optimizer = partial(torch.optim.AdamW, lr=args.lr, weight_decay=0.0)
