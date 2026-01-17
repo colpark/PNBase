@@ -151,7 +151,7 @@ def parse_args():
     parser.add_argument("--max_steps", type=int, default=5000, help="Max training steps")
     parser.add_argument("--batch_size", type=int, default=16, help="Training batch size (all same image)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
 
     # Single instance config
     parser.add_argument("--image_index", type=int, default=0, help="CIFAR-10 image index to overfit")
